@@ -1,13 +1,7 @@
 pipeline {
     agent {
-        docker {
-            // We use the AWS CLI image as our base so we can authenticate
-            image 'amazon/aws-cli'
-            // CRITICAL: Matches the agent with Docker permissions
-            label 'python-static-agent'
-            // We override the entrypoint so we can run shell commands easily
-            args '--entrypoint="" -u root:root'
-        }
+        // We run directly on the agent, NOT inside another container
+        label 'python-static-agent'
     }
 
     environment {
@@ -15,6 +9,8 @@ pipeline {
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
         REGION                = "ap-south-1"
         CLUSTER_NAME          = "demo-eks-cluster"
+        // Add local bin to PATH so we can run the tools we install
+        PATH                  = "${WORKSPACE}/bin:${PATH}"
     }
 
     stages {
@@ -26,21 +22,25 @@ pipeline {
 
         stage('Setup Tools') {
             steps {
-                // Install kubectl and helm inside the container dynamically
-                // This ensures your pipeline works even if the host lacks these tools
+                // Install tools locally to avoid Docker-in-Docker volume issues
                 script {
                     sh '''
-                        yum install -y tar gzip
+                        mkdir -p ${WORKSPACE}/bin
                         
-                        # Install Kubectl
+                        echo "--- Installing AWS CLI ---"
+                        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+                        unzip -q awscliv2.zip
+                        ./aws/install -i ${WORKSPACE}/aws-cli -b ${WORKSPACE}/bin || true
+                        
+                        echo "--- Installing Kubectl ---"
                         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
                         chmod +x kubectl
-                        mv kubectl /usr/local/bin/
+                        mv kubectl ${WORKSPACE}/bin/
                         
-                        # Install Helm
+                        echo "--- Installing Helm ---"
                         curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
                         chmod 700 get_helm.sh
-                        ./get_helm.sh
+                        HELM_INSTALL_DIR=${WORKSPACE}/bin ./get_helm.sh --no-sudo
                     '''
                 }
             }
@@ -59,9 +59,6 @@ pipeline {
                      sh 'helm repo add eks https://aws.github.io/eks-charts'
                      sh 'helm repo update'
                      
-                     // NOTE: We use --set serviceAccount.create=false because we usually 
-                     // create the ServiceAccount in Terraform or let Helm handle it.
-                     // For this demo, we let Helm create it.
                      sh '''
                        helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
                        -n kube-system \

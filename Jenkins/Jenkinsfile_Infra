@@ -1,24 +1,43 @@
 pipeline {
     agent {
-        docker {
-            image 'hashicorp/terraform:light'
-            // CRITICAL: Replace 'my-docker-agent-label' with the name of the agent
-            // that has Docker installed and permissions to run containers.
-            label 'python-static-agent' 
-            args '-u root:root'
-        }
+        // Run directly on the agent, do NOT spin up a sibling container
+        label 'python-static-agent'
     }
 
     environment {
         AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
+        // Add local bin to PATH so the shell can find the 'terraform' command we install
+        PATH                  = "${WORKSPACE}/bin:${PATH}"
     }
 
     stages {
         stage('Checkout') {
             steps {
-                // This will check out the code specifically on the agent you labeled above
                 checkout scm
+            }
+        }
+
+        stage('Install Terraform') {
+            steps {
+                script {
+                    sh '''
+                        mkdir -p ${WORKSPACE}/bin
+                        cd ${WORKSPACE}/bin
+                        
+                        echo "--- Downloading Terraform ---"
+                        // Downloading a specific stable version (Linux AMD64)
+                        curl -O https://releases.hashicorp.com/terraform/1.9.5/terraform_1.9.5_linux_amd64.zip
+                        
+                        echo "--- Installing ---"
+                        unzip -o terraform_1.9.5_linux_amd64.zip
+                        chmod +x terraform
+                        rm terraform_1.9.5_linux_amd64.zip
+                        
+                        echo "--- Verifying ---"
+                        ./terraform --version
+                    '''
+                }
             }
         }
 
@@ -40,7 +59,6 @@ pipeline {
 
         stage('Approval') {
             steps {
-                // The input prompt will appear in the Jenkins UI, pausing the agent
                 input message: 'Create/Update Infrastructure?', ok: 'Yes'
             }
         }

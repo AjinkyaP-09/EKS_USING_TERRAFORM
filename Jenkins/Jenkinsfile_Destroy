@@ -1,6 +1,6 @@
 pipeline {
-    agent { 
-        label 'python-static-agent' 
+    agent {
+        label 'python-static-agent'
     }
 
     environment {
@@ -8,6 +8,7 @@ pipeline {
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
         REGION                = "ap-south-1"
         CLUSTER_NAME          = "demo-eks-cluster"
+        PATH                  = "${WORKSPACE}/bin:${PATH}"
     }
 
     stages {
@@ -17,42 +18,63 @@ pipeline {
             }
         }
 
+        stage('Install Tools') {
+            steps {
+                script {
+                    sh '''
+                        mkdir -p ${WORKSPACE}/bin
+                        cd ${WORKSPACE}/bin
+                        
+                        # --- Install Terraform ---
+                        if [ ! -f terraform ]; then
+                            curl -O https://releases.hashicorp.com/terraform/1.9.5/terraform_1.9.5_linux_amd64.zip
+                            unzip -o terraform_1.9.5_linux_amd64.zip
+                            chmod +x terraform
+                        fi
+
+                        # --- Install AWS CLI (For Kubeconfig) ---
+                        if [ ! -d ../aws-cli ]; then
+                            cd ${WORKSPACE}
+                            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+                            unzip -q -o awscliv2.zip
+                            ./aws/install -i ${WORKSPACE}/aws-cli -b ${WORKSPACE}/bin || true
+                        fi
+                        
+                        # --- Install Kubectl (For deleting ALB) ---
+                         if [ ! -f kubectl ]; then
+                            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                            chmod +x kubectl
+                            mv kubectl ${WORKSPACE}/bin/
+                        fi
+                    '''
+                }
+            }
+        }
+
         stage('Cleanup App & ALB') {
             steps {
                 script {
                     echo "--- Connecting to Cluster ---"
-                    // Fails safely if cluster is already gone
                     try {
                         sh "aws eks update-kubeconfig --region ${REGION} --name ${CLUSTER_NAME}"
                         
                         echo "--- Deleting Ingress/Services ---"
-                        // This triggers the AWS Load Balancer Controller to delete the real ALB
+                        // This triggers the AWS Controller to remove the real ALB
                         sh 'kubectl delete -f k8s/ --ignore-not-found=true'
                         
                         echo "--- Waiting for ALB Destruction ---"
-                        echo "Sleeping 3 minutes to ensure AWS releases the Network Interfaces..."
                         sleep 180 
                     } catch (Exception e) {
-                        echo "Cluster might already be deleted or unreachable. Proceeding to Terraform destroy..."
+                        echo "Cluster might already be deleted. Proceeding..."
                     }
                 }
             }
         }
 
         stage('Terraform Destroy') {
-            // We switch to the Terraform container for the infrastructure destruction
-            agent {
-                docker {
-                    image 'hashicorp/terraform:light'
-                    args '-u root:root'
-                }
-            }
             steps {
                 dir('terraform') {
-                    // We must init again to get the state from S3
                     sh 'terraform init'
-                    
-                    // The actual destruction command
                     sh 'terraform destroy -auto-approve'
                 }
             }
