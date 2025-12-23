@@ -61,17 +61,28 @@ pipeline {
                      sh 'helm repo add eks https://aws.github.io/eks-charts'
                      sh 'helm repo update'
                      
-                     // CRITICAL: We inject the ARN you provided so the controller has permissions
+                     // ADDED: --atomic to automatically rollback if it fails
+                     // ADDED: --force to overwrite potential conflicts from broken installs
                      sh '''
                        helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
                        -n kube-system \
                        --set clusterName=demo-eks-cluster \
                        --set serviceAccount.create=true \
                        --set serviceAccount.name=aws-load-balancer-controller \
-                       --set serviceAccount.annotations."eks\\.amazonaws\\.com/role-arn"="arn:aws:iam::022499018754:role/eks-alb-controller-role"
+                       --set serviceAccount.annotations."eks\\.amazonaws\\.com/role-arn"="arn:aws:iam::022499018754:role/eks-alb-controller-role" \
+                       --force \
+                       --atomic
                      '''
+                     
+                     echo "--- Waiting for AWS Load Balancer Controller to be Ready ---"
+                     // This pauses pipeline until the controller pods are actually running
+                     sh 'kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=300s'
+                     
                    } catch (Exception e) {
-                       echo "Helm install failed or already exists: ${e}"
+                       echo "Helm install failed: ${e}"
+                       // If helm fails, we might want to try uninstalling and reinstalling cleanly in a future run
+                       // but for now, we just report it.
+                       error("Pipeline failed due to Helm Controller installation issues.")
                    }
                 }
             }
