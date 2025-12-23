@@ -1,0 +1,56 @@
+pipeline {
+    agent {
+        docker {
+            image 'hashicorp/terraform:light'
+            // CRITICAL: Replace 'my-docker-agent-label' with the name of the agent
+            // that has Docker installed and permissions to run containers.
+            label 'my-docker-agent-label' 
+            args '-u root:root'
+        }
+    }
+
+    environment {
+        AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                // This will check out the code specifically on the agent you labeled above
+                checkout scm
+            }
+        }
+
+        stage('Terraform Init') {
+            steps {
+                dir('terraform') {
+                    sh 'terraform init'
+                }
+            }
+        }
+
+        stage('Terraform Plan') {
+            steps {
+                dir('terraform') {
+                    sh 'terraform plan -out=tfplan'
+                }
+            }
+        }
+
+        stage('Approval') {
+            steps {
+                // The input prompt will appear in the Jenkins UI, pausing the agent
+                input message: 'Create/Update Infrastructure?', ok: 'Yes'
+            }
+        }
+
+        stage('Terraform Apply') {
+            steps {
+                dir('terraform') {
+                    sh 'terraform apply -input=false tfplan'
+                }
+            }
+        }
+    }
+}
