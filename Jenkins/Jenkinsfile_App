@@ -80,8 +80,17 @@ pipeline {
                      
                    } catch (Exception e) {
                        echo "Helm install failed: ${e}"
-                       // If helm fails, we might want to try uninstalling and reinstalling cleanly in a future run
-                       // but for now, we just report it.
+                       
+                       // DEBUG BLOCK: If it fails, print logs so we can see WHY
+                       echo "--- DEBUG: Fetching Pod Status ---"
+                       sh 'kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller'
+                       
+                       echo "--- DEBUG: Fetching Controller Logs ---"
+                       sh 'kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=50 || true'
+                       
+                       echo "--- DEBUG: Describing Pods ---"
+                       sh 'kubectl describe pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller || true'
+                       
                        error("Pipeline failed due to Helm Controller installation issues.")
                    }
                 }
