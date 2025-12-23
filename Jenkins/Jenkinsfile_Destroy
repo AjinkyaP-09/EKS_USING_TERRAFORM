@@ -61,24 +61,22 @@ pipeline {
                     }
 
                     echo "--- 2. Force Deleting Orphaned Security Groups ---"
-                    // The Controller creates SGs named like 'k8s-default-appingre...'. 
-                    // Terraform doesn't track these, so they block VPC deletion. We must find and kill them.
+                    // Added explicit --region flag to all AWS commands to fix "You must specify a region" error
                     sh '''
                         # Find SGs with the cluster tag or 'k8s' in name that are NOT the cluster SG itself
-                        # Note: This is aggressive. It looks for SGs in the VPC that are likely leaked.
                         
                         VPC_ID=$(aws eks describe-cluster --name ${CLUSTER_NAME} --region ${REGION} --query 'cluster.resourcesVpcConfig.vpcId' --output text || echo "")
                         
-                        if [ ! -z "$VPC_ID" ]; then
+                        if [ ! -z "$VPC_ID" ] && [ "$VPC_ID" != "None" ]; then
                             echo "Scanning VPC $VPC_ID for orphaned Security Groups..."
                             
                             # Find SGs that contain 'k8s-' in description or name, which LBC usually adds
-                            ORPHAN_SGS=$(aws ec2 describe-security-groups --filters Name=vpc-id,Values=$VPC_ID --query "SecurityGroups[?contains(GroupName, 'k8s-') || contains(Description, 'k8s')].GroupId" --output text)
+                            ORPHAN_SGS=$(aws ec2 describe-security-groups --region ${REGION} --filters Name=vpc-id,Values=$VPC_ID --query "SecurityGroups[?contains(GroupName, 'k8s-') || contains(Description, 'k8s')].GroupId" --output text)
                             
                             for sg in $ORPHAN_SGS; do
                                 echo "Deleting Orphan SG: $sg"
                                 # We try to delete. It might fail if still attached to an ENI, but we try.
-                                aws ec2 delete-security-group --group-id $sg || true
+                                aws ec2 delete-security-group --region ${REGION} --group-id $sg || true
                             done
                         else
                             echo "Cluster/VPC not found, skipping SG cleanup."
