@@ -1,6 +1,5 @@
 pipeline {
     agent {
-        // Run directly on the agent
         label 'python-static-agent'
     }
 
@@ -24,20 +23,14 @@ pipeline {
                 script {
                     sh '''
                         mkdir -p ${WORKSPACE}/bin
-                        
-                        echo "--- Installing AWS CLI ---"
                         if [ ! -d "${WORKSPACE}/aws-cli" ]; then
                             curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
                             unzip -q -o awscliv2.zip
                             ./aws/install -i ${WORKSPACE}/aws-cli -b ${WORKSPACE}/bin || true
                         fi
-                        
-                        echo "--- Installing Kubectl ---"
                         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
                         chmod +x ./kubectl
                         mv ./kubectl ${WORKSPACE}/bin/
-                        
-                        echo "--- Installing Helm ---"
                         curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
                         chmod 700 get_helm.sh
                         HELM_INSTALL_DIR=${WORKSPACE}/bin ./get_helm.sh --no-sudo
@@ -59,10 +52,8 @@ pipeline {
                      sh 'helm repo add eks https://aws.github.io/eks-charts'
                      sh 'helm repo update'
                      
-                     // Fetch VPC ID dynamically to fix previous metadata errors
                      def vpcId = sh(script: "aws eks describe-cluster --name ${CLUSTER_NAME} --region ${REGION} --query 'cluster.resourcesVpcConfig.vpcId' --output text", returnStdout: true).trim()
-                     echo "Using VPC ID: ${vpcId}"
-
+                     
                      sh """
                        helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
                        -n kube-system \
@@ -75,13 +66,20 @@ pipeline {
                        --force \
                        --atomic
                      """
-                     
-                     sh 'kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=300s'
-                     
                    } catch (Exception e) {
-                       echo "Helm install failed: ${e}"
-                       // Even if it fails, we continue to Verify to show logs
+                       echo "Helm install warning: ${e}"
                    }
+                }
+            }
+        }
+
+        stage('Restart Controller (Fix Permissions)') {
+            steps {
+                script {
+                    echo "--- Restarting Controller to pick up new IAM Permissions ---"
+                    // This forces the pods to restart and re-authenticate with AWS
+                    sh 'kubectl rollout restart deployment/aws-load-balancer-controller -n kube-system'
+                    sh 'kubectl rollout status deployment/aws-load-balancer-controller -n kube-system --timeout=300s'
                 }
             }
         }
@@ -95,22 +93,17 @@ pipeline {
         stage('Verify & Diagnose') {
             steps {
                 script {
-                    echo "======================================================="
-                    echo "                   DIAGNOSTICS                         "
-                    echo "======================================================="
+                    echo "--- Waiting for ALB Creation (approx 2 mins) ---"
+                    sleep 120
                     
                     echo "--- 1. Ingress Status ---"
                     sh 'kubectl get ingress'
                     
-                    echo "--- 2. Ingress Detailed Events (Check for Errors here) ---"
-                    // This describes the Ingress to see if the ALB Controller accepted it
+                    echo "--- 2. Ingress Events ---"
                     sh 'kubectl describe ingress app-ingress'
-
-                    echo "--- 3. Controller Logs (Last 100 lines) ---"
-                    // This grabs the logs from the controller. Look for 'Access Denied' or 'Unauthorized'
-                    sh 'kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=100'
                     
-                    echo "======================================================="
+                    echo "--- 3. Controller Logs (Errors Only) ---"
+                    sh 'kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=50'
                 }
             }
         }
