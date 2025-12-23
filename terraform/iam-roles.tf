@@ -1,6 +1,3 @@
-# This creates the IAM policy needed by the AWS Load Balancer Controller
-# You must attach this role to the ServiceAccount in Kubernetes later
-
 data "aws_iam_policy_document" "alb_controller_assume" {
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
@@ -24,12 +21,22 @@ resource "aws_iam_role" "alb_controller" {
   assume_role_policy = data.aws_iam_policy_document.alb_controller_assume.json
 }
 
-# In a real scenario, download the full IAM policy JSON from AWS docs. 
-# For brevity, I am attaching a managed policy if available or a simplified one.
-# IMPORTANT: For production, use the full policy.json from AWS Load Balancer Controller docs.
-resource "aws_iam_role_policy_attachment" "alb_controller_policy" {
-  policy_arn = "arn:aws:iam::aws:policy/ElasticLoadBalancingFullAccess" # Simplified for demo
+# --- FIX: Use the Official AWS Policy ---
+# This downloads the policy JSON directly from the AWS GitHub repo
+data "http" "alb_iam_policy" {
+  url = "https://raw.githubusercontent.com/kubernetes-sigs/aws-load-balancer-controller/v2.11.0/docs/install/iam_policy.json"
+}
+
+resource "aws_iam_policy" "alb_controller" {
+  name        = "AWSLoadBalancerControllerIAMPolicy-Custom"
+  path        = "/"
+  description = "Official AWS Load Balancer Controller IAM Policy"
+  policy      = data.http.alb_iam_policy.response_body
+}
+
+resource "aws_iam_role_policy_attachment" "alb_controller_attach" {
   role       = aws_iam_role.alb_controller.name
+  policy_arn = aws_iam_policy.alb_controller.arn
 }
 
 output "alb_role_arn" {
