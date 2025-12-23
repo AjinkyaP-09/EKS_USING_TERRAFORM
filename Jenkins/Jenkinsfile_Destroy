@@ -25,48 +25,68 @@ pipeline {
                         mkdir -p ${WORKSPACE}/bin
                         cd ${WORKSPACE}/bin
                         
-                        # --- Install Terraform ---
                         if [ ! -f terraform ]; then
                             curl -O https://releases.hashicorp.com/terraform/1.9.5/terraform_1.9.5_linux_amd64.zip
                             unzip -o terraform_1.9.5_linux_amd64.zip
                             chmod +x terraform
+                            rm terraform_1.9.5_linux_amd64.zip
                         fi
 
-                        # --- Install AWS CLI (For Kubeconfig) ---
                         if [ ! -d ../aws-cli ]; then
                             cd ${WORKSPACE}
                             curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
                             unzip -q -o awscliv2.zip
                             ./aws/install -i ${WORKSPACE}/aws-cli -b ${WORKSPACE}/bin || true
+                            cd ${WORKSPACE}/bin
                         fi
                         
-                        # --- Install Kubectl (For deleting ALB) ---
                          if [ ! -f kubectl ]; then
                             curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
                             chmod +x kubectl
-                            mv kubectl ${WORKSPACE}/bin/
                         fi
                     '''
                 }
             }
         }
 
-        stage('Cleanup App & ALB') {
+        stage('Nuke Orphaned Resources') {
             steps {
                 script {
-                    echo "--- Connecting to Cluster ---"
+                    echo "--- 1. Connecting to Cluster to Delete Ingress ---"
                     try {
                         sh "aws eks update-kubeconfig --region ${REGION} --name ${CLUSTER_NAME}"
-                        
-                        echo "--- Deleting Ingress/Services ---"
-                        // This triggers the AWS Controller to remove the real ALB
-                        sh 'kubectl delete -f k8s/ --ignore-not-found=true'
-                        
-                        echo "--- Waiting for ALB Destruction ---"
-                        sleep 180 
+                        sh 'kubectl delete -f k8s/ --ignore-not-found=true --timeout=60s || true'
                     } catch (Exception e) {
-                        echo "Cluster might already be deleted. Proceeding..."
+                        echo "Cluster unreachable, skipping kubectl delete."
                     }
+
+                    echo "--- 2. Force Deleting Orphaned Security Groups ---"
+                    // The Controller creates SGs named like 'k8s-default-appingre...'. 
+                    // Terraform doesn't track these, so they block VPC deletion. We must find and kill them.
+                    sh '''
+                        # Find SGs with the cluster tag or 'k8s' in name that are NOT the cluster SG itself
+                        # Note: This is aggressive. It looks for SGs in the VPC that are likely leaked.
+                        
+                        VPC_ID=$(aws eks describe-cluster --name ${CLUSTER_NAME} --region ${REGION} --query 'cluster.resourcesVpcConfig.vpcId' --output text || echo "")
+                        
+                        if [ ! -z "$VPC_ID" ]; then
+                            echo "Scanning VPC $VPC_ID for orphaned Security Groups..."
+                            
+                            # Find SGs that contain 'k8s-' in description or name, which LBC usually adds
+                            ORPHAN_SGS=$(aws ec2 describe-security-groups --filters Name=vpc-id,Values=$VPC_ID --query "SecurityGroups[?contains(GroupName, 'k8s-') || contains(Description, 'k8s')].GroupId" --output text)
+                            
+                            for sg in $ORPHAN_SGS; do
+                                echo "Deleting Orphan SG: $sg"
+                                # We try to delete. It might fail if still attached to an ENI, but we try.
+                                aws ec2 delete-security-group --group-id $sg || true
+                            done
+                        else
+                            echo "Cluster/VPC not found, skipping SG cleanup."
+                        fi
+                    '''
+                    
+                    echo "--- 3. Waiting for cleanup ---"
+                    sleep 60
                 }
             }
         }
@@ -75,6 +95,7 @@ pipeline {
             steps {
                 dir('terraform') {
                     sh 'terraform init'
+                    // auto-approve ensures it doesn't wait for input
                     sh 'terraform destroy -auto-approve'
                 }
             }
