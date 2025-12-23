@@ -1,6 +1,6 @@
 pipeline {
     agent {
-        // We run directly on the agent, NOT inside another container
+        // Run directly on the agent
         label 'python-static-agent'
     }
 
@@ -9,7 +9,6 @@ pipeline {
         AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
         REGION                = "ap-south-1"
         CLUSTER_NAME          = "demo-eks-cluster"
-        // Add local bin to PATH so we can run the tools we install
         PATH                  = "${WORKSPACE}/bin:${PATH}"
     }
 
@@ -22,20 +21,22 @@ pipeline {
 
         stage('Setup Tools') {
             steps {
-                // Install tools locally to avoid Docker-in-Docker volume issues
                 script {
                     sh '''
                         mkdir -p ${WORKSPACE}/bin
                         
                         echo "--- Installing AWS CLI ---"
-                        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
-                        unzip -q awscliv2.zip
-                        ./aws/install -i ${WORKSPACE}/aws-cli -b ${WORKSPACE}/bin || true
+                        # Only install if not present to save time
+                        if [ ! -d "${WORKSPACE}/aws-cli" ]; then
+                            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+                            unzip -q -o awscliv2.zip
+                            ./aws/install -i ${WORKSPACE}/aws-cli -b ${WORKSPACE}/bin || true
+                        fi
                         
                         echo "--- Installing Kubectl ---"
                         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-                        chmod +x kubectl
-                        mv kubectl ${WORKSPACE}/bin/
+                        chmod +x ${WORKSPACE}/bin/kubectl
+                        mv kubectl ${WORKSPACE}/bin/ || true
                         
                         echo "--- Installing Helm ---"
                         curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
@@ -59,12 +60,14 @@ pipeline {
                      sh 'helm repo add eks https://aws.github.io/eks-charts'
                      sh 'helm repo update'
                      
+                     // CRITICAL: We inject the ARN you provided so the controller has permissions
                      sh '''
                        helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
                        -n kube-system \
                        --set clusterName=demo-eks-cluster \
                        --set serviceAccount.create=true \
-                       --set serviceAccount.name=aws-load-balancer-controller
+                       --set serviceAccount.name=aws-load-balancer-controller \
+                       --set serviceAccount.annotations."eks\\.amazonaws\\.com/role-arn"="arn:aws:iam::022499018754:role/eks-alb-controller-role"
                      '''
                    } catch (Exception e) {
                        echo "Helm install failed or already exists: ${e}"
@@ -75,7 +78,8 @@ pipeline {
 
         stage('Deploy 3-Tier App') {
             steps {
-                sh 'kubectl apply -f k8s/'
+                // This sends your yaml to the cluster
+                sh 'kubectl apply -f k8s/app.yaml'
             }
         }
 
@@ -83,6 +87,7 @@ pipeline {
             steps {
                 sh 'kubectl get pods'
                 sh 'kubectl get ingress'
+                echo "Wait 2-3 minutes for the 'ADDRESS' column in 'kubectl get ingress' to show your Load Balancer URL."
             }
         }
     }
