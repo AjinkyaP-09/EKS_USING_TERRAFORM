@@ -35,8 +35,9 @@ pipeline {
                         
                         echo "--- Installing Kubectl ---"
                         curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-                        chmod +x ${WORKSPACE}/bin/kubectl
-                        mv kubectl ${WORKSPACE}/bin/ || true
+                        # FIX: chmod the local file first, THEN move it
+                        chmod +x ./kubectl
+                        mv ./kubectl ${WORKSPACE}/bin/
                         
                         echo "--- Installing Helm ---"
                         curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
