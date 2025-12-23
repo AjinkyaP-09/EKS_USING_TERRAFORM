@@ -1,0 +1,92 @@
+pipeline {
+    agent {
+        docker {
+            // We use the AWS CLI image as our base so we can authenticate
+            image 'amazon/aws-cli'
+            // CRITICAL: Matches the agent with Docker permissions
+            label 'python-static-agent'
+            // We override the entrypoint so we can run shell commands easily
+            args '--entrypoint="" -u root:root'
+        }
+    }
+
+    environment {
+        AWS_ACCESS_KEY_ID     = credentials('aws-access-key')
+        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
+        REGION                = "ap-south-1"
+        CLUSTER_NAME          = "demo-eks-cluster"
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Setup Tools') {
+            steps {
+                // Install kubectl and helm inside the container dynamically
+                // This ensures your pipeline works even if the host lacks these tools
+                script {
+                    sh '''
+                        yum install -y tar gzip
+                        
+                        # Install Kubectl
+                        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+                        chmod +x kubectl
+                        mv kubectl /usr/local/bin/
+                        
+                        # Install Helm
+                        curl -fsSL -o get_helm.sh https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3
+                        chmod 700 get_helm.sh
+                        ./get_helm.sh
+                    '''
+                }
+            }
+        }
+
+        stage('Connect to Cluster') {
+            steps {
+                sh "aws eks update-kubeconfig --region ${REGION} --name ${CLUSTER_NAME}"
+            }
+        }
+        
+        stage('Install ALB Controller') {
+            steps {
+                script {
+                   try {
+                     sh 'helm repo add eks https://aws.github.io/eks-charts'
+                     sh 'helm repo update'
+                     
+                     // NOTE: We use --set serviceAccount.create=false because we usually 
+                     // create the ServiceAccount in Terraform or let Helm handle it.
+                     // For this demo, we let Helm create it.
+                     sh '''
+                       helm upgrade --install aws-load-balancer-controller eks/aws-load-balancer-controller \
+                       -n kube-system \
+                       --set clusterName=demo-eks-cluster \
+                       --set serviceAccount.create=true \
+                       --set serviceAccount.name=aws-load-balancer-controller
+                     '''
+                   } catch (Exception e) {
+                       echo "Helm install failed or already exists: ${e}"
+                   }
+                }
+            }
+        }
+
+        stage('Deploy 3-Tier App') {
+            steps {
+                sh 'kubectl apply -f k8s/'
+            }
+        }
+
+        stage('Verify') {
+            steps {
+                sh 'kubectl get pods'
+                sh 'kubectl get ingress'
+            }
+        }
+    }
+}
